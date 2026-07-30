@@ -152,16 +152,25 @@ export const updateStoreProductAccess = async (productId, storeId, enabled) => {
 };
 
 // ─── GET all products for a store (with access status) ───
-export const getStoreProductsAccess = async (storeId) => {
-  const url = `${SERVERURL}/api/store/products/${storeId}`;
-  console.log('🔍 getStoreProductsAccess URL:', url);
-  try {
-    const res = await fetch(url);
-    return handleResponse(res);
-  } catch (error) {
-    console.error('🔥 Fetch error:', error);
-    throw error;
-  }
+// In storeManagementAPI.js
+
+// GET all products for a store (with pagination, search, filter, sort)
+export const getStoreProductsAccess = async (storeId, options = {}) => {
+  if (!storeId) throw new Error('Store ID is required');
+
+  const { page = 1, limit = 10, search = '', filter = '', sort = '' } = options;
+
+  // Build query string
+  const params = new URLSearchParams({
+    page,
+    limit,
+    search,
+    filter,
+    sort,
+  });
+
+  const res = await fetch(`${SERVERURL}/api/store/products/${storeId}?${params.toString()}`);
+  return handleResponse(res);
 };
 
 // ─── DELETE product access (optional) ───

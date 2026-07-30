@@ -7,12 +7,11 @@ import toast, { Toaster } from 'react-hot-toast';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import 'bootstrap-icons/font/bootstrap-icons.css';
 import './Store-Product.css';
-import { getProductsAPI } from '../../services/productService';
 import { getAllCustomReviewsAPI } from '../../services/customReviewService';
 import {
   updateStoreProductAccess,
   getStoreProductsAccess,
-  deleteStoreProductAccess,   // ✅ new import
+  deleteStoreProductAccess,
 } from '../../services/storeManagementAPI';
 import SERVERURL from '../../services/serverURL';
 
@@ -24,19 +23,6 @@ function useDebounce(value, delay) {
     return () => clearTimeout(handler);
   }, [value, delay]);
   return debouncedValue;
-}
-
-// ─── Pagination ───
-function usePagination(totalItems, itemsPerPage = 10) {
-  const [currentPage, setCurrentPage] = useState(1);
-  const totalPages = Math.max(1, Math.ceil(totalItems / itemsPerPage));
-  useEffect(() => {
-    if (currentPage > totalPages) setCurrentPage(1);
-  }, [totalPages, currentPage]);
-  const goToPage = (page) => setCurrentPage(Math.max(1, Math.min(page, totalPages)));
-  const nextPage = () => goToPage(currentPage + 1);
-  const prevPage = () => goToPage(currentPage - 1);
-  return { currentPage, totalPages, goToPage, nextPage, prevPage, setCurrentPage };
 }
 
 // ─── Product Row ───
@@ -103,17 +89,17 @@ const ProductRow = memo(({ product, onToggle, onView, onEdit, onDelete, isEnable
 });
 ProductRow.displayName = 'ProductRow';
 
-// ─── Skeleton ───
+// ─── Skeleton Row ───
 const SkeletonRow = memo(() => (
   <tr className="skeleton-row">
-    <td><div className="skeleton" style={{ width: '120px', height: '40px' }}></div></td>
-    <td><div className="skeleton" style={{ width: '80px', height: '20px' }}></div></td>
-    <td><div className="skeleton" style={{ width: '100px', height: '20px' }}></div></td>
-    <td><div className="skeleton" style={{ width: '80px', height: '20px' }}></div></td>
-    <td><div className="skeleton" style={{ width: '60px', height: '20px' }}></div></td>
-    <td><div className="skeleton" style={{ width: '50px', height: '20px' }}></div></td>
-    <td><div className="skeleton" style={{ width: '120px', height: '30px' }}></div></td>
-    <td><div className="skeleton" style={{ width: '60px', height: '30px' }}></div></td>
+    <td><div className="skeleton" style={{ width: '120px', height: '40px' }} /></td>
+    <td><div className="skeleton" style={{ width: '80px', height: '20px' }} /></td>
+    <td><div className="skeleton" style={{ width: '100px', height: '20px' }} /></td>
+    <td><div className="skeleton" style={{ width: '80px', height: '20px' }} /></td>
+    <td><div className="skeleton" style={{ width: '60px', height: '20px' }} /></td>
+    <td><div className="skeleton" style={{ width: '50px', height: '20px' }} /></td>
+    <td><div className="skeleton" style={{ width: '120px', height: '30px' }} /></td>
+    <td><div className="skeleton" style={{ width: '60px', height: '30px' }} /></td>
   </tr>
 ));
 SkeletonRow.displayName = 'SkeletonRow';
@@ -123,19 +109,28 @@ export const dynamic = "force-dynamic";
 export default function StoreProductsPage() {
   const router = useRouter();
   const [products, setProducts] = useState([]);
-  const [allMasterProducts, setAllMasterProducts] = useState([]);
+  const [totalProducts, setTotalProducts] = useState(0);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterOption, setFilterOption] = useState('');
   const [sortOption, setSortOption] = useState('');
   const [itemsPerPage, setItemsPerPage] = useState(10);
+  const [currentPage, setCurrentPage] = useState(1);
   const [showModal, setShowModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [storeId, setStoreId] = useState(null);
   const [updating, setUpdating] = useState({});
   const isSubmitting = useRef(false);
 
-  // Get storeId from sessionStorage
+  const debouncedSearchTerm = useDebounce(searchTerm, 500);
+  const [isPending, startTransition] = useTransition();
+
+  const getImageUrl = useCallback((filename) => {
+    if (!filename) return null;
+    return `${SERVERURL}/imgUploads/${filename}`;
+  }, []);
+
+  // ─── Get storeId ───
   useEffect(() => {
     const storedStoreId = sessionStorage.getItem('storeId');
     if (storedStoreId && storedStoreId !== 'null' && storedStoreId !== 'undefined') {
@@ -146,108 +141,138 @@ export default function StoreProductsPage() {
     }
   }, [router]);
 
-  const debouncedSearchTerm = useDebounce(searchTerm, 300);
-  const [isPending, startTransition] = useTransition();
+  // ─── Fetch products ───
+  const fetchData = useCallback(async (page = currentPage, limit = itemsPerPage) => {
+    if (!storeId) {
+      setLoading(false);
+      return;
+    }
 
-  const getImageUrl = useCallback((filename) => {
-    if (!filename) return null;
-    return `${SERVERURL}/imgUploads/${filename}`;
-  }, []);
-
-  // ─── Fetch enabled products (with custom price/stock) ───
-  const fetchData = useCallback(async () => {
-    if (!storeId) return;
     setLoading(true);
     try {
-      console.log('🔵 fetchData called for storeId:', storeId);
-      const enabledRes = await getStoreProductsAccess(storeId);
+      const options = {
+        page,
+        limit,
+        search: debouncedSearchTerm,
+        filter: filterOption,
+        sort: sortOption,
+      };
+      console.log('🔵 fetchData with options:', options);
+
+      const enabledRes = await getStoreProductsAccess(storeId, options);
       console.log('📦 enabledRes:', enabledRes);
 
-      if (!enabledRes.success) throw new Error(enabledRes.message);
+      if (!enabledRes || !enabledRes.success) {
+        throw new Error(enabledRes?.message || 'Failed to fetch store products');
+      }
 
-      console.log('📋 enabledRes.data length:', enabledRes.data?.length);
+      const accessRecords = enabledRes.data || [];
+      const total = enabledRes.total || 0;
 
-      let enabledProducts = [];
-      if (enabledRes.data && Array.isArray(enabledRes.data)) {
-        const enabledAccess = enabledRes.data.filter(access => access.enabled === true);
-        enabledProducts = enabledAccess.map(access => {
-          console.log('🔎 Access record:', access);
-          if (!access.productId) {
-            console.warn('⚠️ Missing productId in access record:', access);
+      let enabledProducts = accessRecords
+        .filter(access => access.productId !== null && access.enabled === true)
+        .map(access => {
+          const product = access.productId;
+          if (!product || !product._id) {
+            console.warn('⚠️ Invalid product in access record:', access);
             return null;
           }
           return {
-            ...access.productId,
-            _id: access.productId._id,
+            ...product,
+            _id: product._id,
             storeAccessId: access._id,
             enabled: access.enabled,
-            unitPrice: access.customPrice ?? access.productId.unitPrice,
-            stock: access.customStock ?? access.productId.stock,
+            unitPrice: access.customPrice ?? product.unitPrice,
+            stock: access.customStock ?? product.stock,
           };
-        }).filter(Boolean);
+        })
+        .filter(Boolean);
+
+      // Attach ratings
+      let ratedProducts = [];
+      try {
+        const reviewsRes = await getAllCustomReviewsAPI();
+        const allReviews = reviewsRes.success ? reviewsRes.data : [];
+        const reviewsByProduct = {};
+        allReviews.forEach(review => {
+          const pid = review.productId?._id || review.productId;
+          if (!pid) return;
+          if (!reviewsByProduct[pid]) reviewsByProduct[pid] = [];
+          reviewsByProduct[pid].push(review);
+        });
+        ratedProducts = enabledProducts.map(product => {
+          const productReviews = reviewsByProduct[product._id] || [];
+          const totalRating = productReviews.reduce((sum, r) => sum + (r.rating || 0), 0);
+          const avgRating = productReviews.length
+            ? parseFloat((totalRating / productReviews.length).toFixed(1))
+            : 0;
+          return { ...product, avgRating, reviewCount: productReviews.length };
+        });
+      } catch (ratingError) {
+        console.error('❌ Error attaching ratings:', ratingError);
+        ratedProducts = enabledProducts.map(p => ({ ...p, avgRating: 0, reviewCount: 0 }));
       }
 
-      console.log('📦 enabledProducts after mapping (only enabled):', enabledProducts);
-
-      const allRes = await getProductsAPI();
-      if (!allRes.success) throw new Error(allRes.message);
-      let allData = allRes.data;
-
-      const reviewsRes = await getAllCustomReviewsAPI();
-      const allReviews = reviewsRes.success ? reviewsRes.data : [];
-      const reviewsByProduct = {};
-      allReviews.forEach(review => {
-        const pid = review.productId?._id || review.productId;
-        if (!reviewsByProduct[pid]) reviewsByProduct[pid] = [];
-        reviewsByProduct[pid].push(review);
-      });
-
-      const attachRatings = (productsArray) => productsArray.map(product => {
-        const productReviews = reviewsByProduct[product._id] || [];
-        const totalRating = productReviews.reduce((sum, r) => sum + r.rating, 0);
-        const avgRating = productReviews.length ? parseFloat((totalRating / productReviews.length).toFixed(1)) : 0;
-        return { ...product, avgRating, reviewCount: productReviews.length };
-      });
-
-      const ratedEnabled = attachRatings(enabledProducts);
-      console.log('⭐ ratedEnabled (enabled only):', ratedEnabled);
-      setProducts(ratedEnabled);
-      setAllMasterProducts(attachRatings(allData));
-      console.log('✅ State updated: products count =', ratedEnabled.length);
+      setProducts(ratedProducts);
+      setTotalProducts(total);
+      setCurrentPage(enabledRes.page || page);
     } catch (error) {
       console.error('❌ fetchData error:', error);
       toast.error('Failed to load products');
+      setProducts([]);
+      setTotalProducts(0);
     } finally {
       setLoading(false);
     }
-  }, [storeId]);
+  }, [storeId, debouncedSearchTerm, filterOption, sortOption, itemsPerPage]);
 
+  // ─── Refetch on changes ───
   useEffect(() => {
-    if (storeId) fetchData();
-  }, [fetchData, storeId]);
+    if (storeId) {
+      setCurrentPage(1);
+      fetchData(1);
+    }
+  }, [storeId, debouncedSearchTerm, filterOption, sortOption, itemsPerPage]);
 
-  // ─── Toggle product (enable/disable) ───
+  // ─── Pagination helpers ───
+  const totalPages = Math.max(1, Math.ceil(totalProducts / itemsPerPage));
+
+  const goToPage = (page) => {
+    setCurrentPage(page);
+    fetchData(page);
+  };
+  const nextPage = () => { if (currentPage < totalPages) goToPage(currentPage + 1); };
+  const prevPage = () => { if (currentPage > 1) goToPage(currentPage - 1); };
+
+  // ─── Memoized page numbers ───
+  const pageNumbers = useMemo(() => {
+    const pages = [];
+    const maxVisible = 5;
+    let start = Math.max(1, currentPage - Math.floor(maxVisible / 2));
+    let end = Math.min(totalPages, start + maxVisible - 1);
+    if (end - start + 1 < maxVisible) start = Math.max(1, end - maxVisible + 1);
+    for (let i = start; i <= end; i++) pages.push(i);
+    return pages;
+  }, [currentPage, totalPages]);
+
+  // ─── Toggle product ───
   const toggleProduct = async (productId, currentEnabled) => {
     if (isSubmitting.current) return;
     isSubmitting.current = true;
 
     const newEnabled = !currentEnabled;
-    console.log(`🔄 Toggling product ${productId} from ${currentEnabled} to ${newEnabled}`);
     setUpdating(prev => ({ ...prev, [productId]: true }));
 
     try {
       const response = await updateStoreProductAccess(productId, storeId, newEnabled);
-      console.log('📤 Toggle response:', response);
       if (response.success) {
         toast.success(`Product ${newEnabled ? 'enabled' : 'disabled'} for this store`);
-        console.log('✅ Toggle succeeded, calling fetchData...');
-        await fetchData();
-        console.log('✅ fetchData completed');
+        await fetchData(currentPage);
       } else {
         toast.error(response.message || 'Failed to update');
       }
     } catch (error) {
-      console.error('❌ Error toggling product:', error);
+      console.error(error);
       toast.error('Server error');
     } finally {
       setUpdating(prev => ({ ...prev, [productId]: false }));
@@ -255,7 +280,7 @@ export default function StoreProductsPage() {
     }
   };
 
-  // ─── Delete (PERMANENTLY remove access record) ───
+  // ─── Delete product access ───
   const handleDelete = async (id) => {
     if (!window.confirm('Remove this product permanently from your store?')) return;
     if (isSubmitting.current) return;
@@ -263,11 +288,10 @@ export default function StoreProductsPage() {
 
     setUpdating(prev => ({ ...prev, [id]: true }));
     try {
-      // ✅ Call the DELETE endpoint to remove the access record entirely
       const response = await deleteStoreProductAccess(id, storeId);
       if (response.success) {
         toast.success('Product permanently removed from your store');
-        await fetchData();
+        await fetchData(currentPage);
       } else {
         toast.error(response.message || 'Failed to remove product');
       }
@@ -280,7 +304,6 @@ export default function StoreProductsPage() {
     }
   };
 
-  // ─── View / Edit ───
   const handleView = (product) => {
     setSelectedProduct(product);
     setShowModal(true);
@@ -293,64 +316,22 @@ export default function StoreProductsPage() {
     router.push(`/All-store-management/Store-Product/Store-Product-Edit/${id}`);
   };
 
-  // ─── Filter & sort ───
-  const filteredAndSortedProducts = useMemo(() => {
-    let result = [...products];
-    if (debouncedSearchTerm) {
-      const term = debouncedSearchTerm.toLowerCase();
-      result = result.filter(p =>
-        p.productName?.toLowerCase().includes(term) ||
-        p.brand?.toLowerCase().includes(term)
-      );
-    }
-    if (filterOption === 'published') result = result.filter(p => p.published === true);
-    if (filterOption === 'featured') result = result.filter(p => p.featured === true);
-    if (filterOption === 'todayDeal') result = result.filter(p => p.todaysDeal === true);
-    if (filterOption === 'discount') result = result.filter(p => p.discount > 0);
-    if (sortOption === 'price-asc') result.sort((a, b) => (a.unitPrice || 0) - (b.unitPrice || 0));
-    if (sortOption === 'price-desc') result.sort((a, b) => (b.unitPrice || 0) - (a.unitPrice || 0));
-    if (sortOption === 'rating-desc') result.sort((a, b) => (b.avgRating || 0) - (a.avgRating || 0));
-    if (sortOption === 'name-asc') result.sort((a, b) => (a.productName || '').localeCompare(b.productName || ''));
-    return result;
-  }, [products, debouncedSearchTerm, filterOption, sortOption]);
-
-  const { currentPage, totalPages, goToPage, nextPage, prevPage, setCurrentPage } =
-    usePagination(filteredAndSortedProducts.length, itemsPerPage);
-
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [debouncedSearchTerm, filterOption, sortOption, setCurrentPage]);
-
-  const paginatedProducts = useMemo(() => {
-    const start = (currentPage - 1) * itemsPerPage;
-    return filteredAndSortedProducts.slice(start, start + itemsPerPage);
-  }, [filteredAndSortedProducts, currentPage, itemsPerPage]);
-
-  const pageNumbers = useMemo(() => {
-    const pages = [];
-    const maxVisible = 5;
-    let start = Math.max(1, currentPage - Math.floor(maxVisible / 2));
-    let end = Math.min(totalPages, start + maxVisible - 1);
-    if (end - start + 1 < maxVisible) start = Math.max(1, end - maxVisible + 1);
-    for (let i = start; i <= end; i++) pages.push(i);
-    return pages;
-  }, [currentPage, totalPages]);
-
   const resetFilters = () => {
     setSearchTerm('');
     setFilterOption('');
     setSortOption('');
     setCurrentPage(1);
   };
+
   const handleItemsPerPageChange = (e) => {
-    setItemsPerPage(parseInt(e.target.value, 10));
+    const newLimit = parseInt(e.target.value, 10);
+    setItemsPerPage(newLimit);
     setCurrentPage(1);
   };
+
   const handleSearchChange = (e) => startTransition(() => setSearchTerm(e.target.value));
 
-  const startItem = filteredAndSortedProducts.length === 0 ? 0 : (currentPage - 1) * itemsPerPage + 1;
-  const endItem = Math.min(currentPage * itemsPerPage, filteredAndSortedProducts.length);
-
+  // ─── Conditional return AFTER all hooks ───
   if (!storeId) {
     return (
       <div className="store-products-container text-center py-5">
@@ -360,6 +341,10 @@ export default function StoreProductsPage() {
     );
   }
 
+  // ─── Render helper variables ───
+  const startItem = totalProducts === 0 ? 0 : (currentPage - 1) * itemsPerPage + 1;
+  const endItem = Math.min(currentPage * itemsPerPage, totalProducts);
+
   return (
     <div className="store-products-container">
       <Toaster position="top-right" />
@@ -368,7 +353,6 @@ export default function StoreProductsPage() {
         <h4 className="page-title">My Store Products</h4>
       </div>
 
-      {/* Filter Bar */}
       <div className="filter-bar">
         <div className="row g-2 align-items-end">
           <div className="col-md-4">
@@ -404,7 +388,6 @@ export default function StoreProductsPage() {
         </div>
       </div>
 
-      {/* Table */}
       <div className="table-responsive">
         {loading ? (
           <table className="med-table">
@@ -440,7 +423,7 @@ export default function StoreProductsPage() {
                 </tr>
               </thead>
               <tbody>
-                {paginatedProducts.map(product => (
+                {products.map(product => (
                   <ProductRow
                     key={product._id}
                     product={product}
@@ -453,19 +436,19 @@ export default function StoreProductsPage() {
                     getImageUrl={getImageUrl}
                   />
                 ))}
-                {paginatedProducts.length === 0 && (
+                {products.length === 0 && (
                   <tr>
                     <td colSpan={8} className="text-center py-4">
-                      No products are enabled for your store. Enable products from the "All Products" page.
+                      No products match your criteria.
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
-            {filteredAndSortedProducts.length > 0 && (
+            {totalProducts > 0 && (
               <div className="pagination-controls">
                 <div className="pagination-info">
-                  Showing {startItem} to {endItem} of {filteredAndSortedProducts.length} products
+                  Showing {startItem} to {endItem} of {totalProducts} products
                 </div>
                 <div className="pagination-actions">
                   <select className="form-select per-page-select" value={itemsPerPage} onChange={handleItemsPerPageChange}>

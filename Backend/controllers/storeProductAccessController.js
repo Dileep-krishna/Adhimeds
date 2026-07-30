@@ -35,21 +35,120 @@ export const updateProductAccess = async (req, res) => {
 };
 
 // ─── 2️⃣ GET all products for a store ───
+// ─── 2️⃣ GET all products for a store (with pagination, search, filter, sort) ───
 export const getStoreProducts = async (req, res) => {
   try {
     const { storeId } = req.params;
+    const {
+      page = 1,
+      limit = 10,
+      search = '',
+      filter = '',
+      sort = ''
+    } = req.query;
 
+    // Validate storeId format
     if (!mongoose.Types.ObjectId.isValid(storeId)) {
       return res.status(400).json({ success: false, message: 'Invalid store ID' });
     }
 
-    const accessRecords = await StoreProductAccess.find({ storeId })
-      .populate('productId', 'productName brand unitPrice thumbnail mainCategory')
-      .lean();
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const skip = (pageNum - 1) * limitNum;
+
+    // ─── Build base filter for StoreAccess ───
+    const accessFilter = {
+      storeId: new mongoose.Types.ObjectId(storeId),  // ✅ use 'new'
+      enabled: true,
+      productId: { $ne: null }
+    };
+
+    // ─── Build filter for Product (search + filter) ───
+    const productFilter = {};
+
+    // Search: productName or brand (case‑insensitive)
+    if (search) {
+      productFilter.$or = [
+        { productName: { $regex: search, $options: 'i' } },
+        { brand: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    // Filter: published, featured, todaysDeal, discount
+    if (filter === 'published') productFilter.published = true;
+    else if (filter === 'featured') productFilter.featured = true;
+    else if (filter === 'todayDeal') productFilter.todaysDeal = true;
+    else if (filter === 'discount') productFilter.discount = { $gt: 0 };
+
+    // ─── Build sort object ───
+    let sortObj = {};
+    if (sort === 'price-asc') sortObj['productInfo.unitPrice'] = 1;
+    else if (sort === 'price-desc') sortObj['productInfo.unitPrice'] = -1;
+    else if (sort === 'name-asc') sortObj['productInfo.productName'] = 1;
+    else if (sort === 'rating-desc') {
+      // Fallback: rating sort not supported without extra aggregation
+      sortObj['productInfo.productName'] = 1;
+    } else {
+      sortObj['createdAt'] = -1; // default newest first
+    }
+
+    // ─── Aggregation pipeline ───
+    const pipeline = [
+      { $match: accessFilter },
+      {
+        $lookup: {
+          from: 'products',
+          localField: 'productId',
+          foreignField: '_id',
+          as: 'productInfo'
+        }
+      },
+      { $unwind: '$productInfo' },
+      { $match: productFilter },
+      { $sort: sortObj },
+      { $skip: skip },
+      { $limit: limitNum }
+    ];
+
+    // ─── Count pipeline (same but without skip/limit) ───
+    const countPipeline = [
+      { $match: accessFilter },
+      {
+        $lookup: {
+          from: 'products',
+          localField: 'productId',
+          foreignField: '_id',
+          as: 'productInfo'
+        }
+      },
+      { $unwind: '$productInfo' },
+      { $match: productFilter },
+      { $count: 'total' }
+    ];
+
+    const [data, countResult] = await Promise.all([
+      StoreProductAccess.aggregate(pipeline),
+      StoreProductAccess.aggregate(countPipeline)
+    ]);
+
+    const total = countResult.length > 0 ? countResult[0].total : 0;
+
+    // ─── Format response: replace productInfo with productId ───
+    const formattedData = data.map(item => {
+      const { productInfo, ...rest } = item;
+      return {
+        ...rest,
+        productId: productInfo
+      };
+    });
 
     res.status(200).json({
       success: true,
-      data: accessRecords
+      data: formattedData,
+      total,
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(total / limitNum)
     });
   } catch (error) {
     console.error('❌ Error fetching store products:', error);
